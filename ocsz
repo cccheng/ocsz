@@ -23,9 +23,13 @@ KEYMAP="enter resume | ctrl-f fork | alt-n new | alt-l continue last | alt-s sho
 
 usage() {
   cat <<EOF
-Usage: ocsz [--help]
+Usage: ocsz [--help] [-- OPENCODE_ARG ...]
 
 Browse opencode sessions with fzf.
+
+Extra opencode args (applied to resume/fork/new/last):
+  ocsz -- --port 4096
+  OCSZ_OPENCODE_ARGS="--port 4096" ocsz   # CLI '--' overrides this
 
 Keymap:
   enter    resume selected session
@@ -222,17 +226,26 @@ delete_session() {
   esac
 }
 
+print_opencode_cmd() {
+  local arg
+  printf 'opencode'
+  for arg in "$@"; do printf ' %q' "$arg"; done
+  printf '\n'
+}
+
 run_action() {
   local action=$1 id=${2:-} dir=${3:-}
+  local -a extra=()
+  [[ -n ${OCSZ_OPENCODE_ARGS:-} ]] && read -r -a extra <<<"$OCSZ_OPENCODE_ARGS"
   case $action in
     resume)
-      if [[ ${OCSZ_DRY_RUN:-0} == 1 ]]; then printf 'opencode %s -s %s\n' "$dir" "$id"; else exec opencode "$dir" -s "$id"; fi ;;
+      if [[ ${OCSZ_DRY_RUN:-0} == 1 ]]; then print_opencode_cmd "${extra[@]}" "$dir" -s "$id"; else exec opencode "${extra[@]}" "$dir" -s "$id"; fi ;;
     fork)
-      if [[ ${OCSZ_DRY_RUN:-0} == 1 ]]; then printf 'opencode %s --fork -s %s\n' "$dir" "$id"; else exec opencode "$dir" --fork -s "$id"; fi ;;
+      if [[ ${OCSZ_DRY_RUN:-0} == 1 ]]; then print_opencode_cmd "${extra[@]}" "$dir" --fork -s "$id"; else exec opencode "${extra[@]}" "$dir" --fork -s "$id"; fi ;;
     new)
-      if [[ ${OCSZ_DRY_RUN:-0} == 1 ]]; then printf 'opencode\n'; else exec opencode; fi ;;
+      if [[ ${OCSZ_DRY_RUN:-0} == 1 ]]; then print_opencode_cmd "${extra[@]}"; else exec opencode "${extra[@]}"; fi ;;
     last)
-      if [[ ${OCSZ_DRY_RUN:-0} == 1 ]]; then printf 'opencode -c\n'; else exec opencode -c; fi ;;
+      if [[ ${OCSZ_DRY_RUN:-0} == 1 ]]; then print_opencode_cmd "${extra[@]}" -c; else exec opencode "${extra[@]}" -c; fi ;;
     *) printf 'Unknown action: %s\n' "$action" >&2; return 2 ;;
   esac
 }
@@ -275,6 +288,16 @@ main() {
     --truncate-pad) truncate_pad "$2" "$3"; exit 0 ;;
     --action) run_action "$2" "${3:-}" "${4:-}"; exit 0 ;;
   esac
+
+  if [[ ${1:-} == -- ]]; then
+    shift
+    OCSZ_OPENCODE_ARGS="$*"
+    export OCSZ_OPENCODE_ARGS
+  elif (($#)); then
+    printf 'Unknown argument: %s\n\n' "$1" >&2
+    usage >&2
+    exit 2
+  fi
 
   cache=$(mktemp)
   input=$(mktemp)

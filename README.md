@@ -63,6 +63,8 @@ You can also just run the script directly:
 
 Run `ocsz` with no arguments to open the picker. Type to fuzzy-search, then use the keys below.
 
+Pass extra opencode args after `--`, for example `ocsz -- --port 4096`; they apply to resume, fork-and-resume, new, and continue-last launches.
+
 | Key            | Action                                            |
 | -------------- | ------------------------------------------------- |
 | `Enter`        | Resume the selected session                       |
@@ -99,9 +101,9 @@ OCSZ_NO_COLOR=1 ocsz
 `ocsz` does not parse opencode's storage files directly. Instead it drives the `opencode` CLI:
 
 - list sessions: `opencode db --format tsv "SELECT ... FROM session ..."`
-- resume: `opencode <dir> -s <id>`
-- fork and resume: `opencode <dir> --fork -s <id>`
-- continue last: `opencode -c`
+- resume: `opencode [extra...] <dir> -s <id>`
+- fork and resume: `opencode [extra...] <dir> --fork -s <id>`
+- continue last: `opencode [extra...] -c`
 - delete: `opencode session delete <id>`
 
 This keeps the tool independent of opencode's on-disk format.
@@ -121,6 +123,7 @@ A few knobs live at the top of the `ocsz` script:
 | `NO_COLOR`          | Disable all color (standard convention).                       |
 | `OCSZ_NO_COLOR`     | Disable all color (tool-specific opt-out).                     |
 | `OCSZ_DRY_RUN=1`    | Make actions print the `opencode` command instead of running it (useful for testing). |
+| `OCSZ_OPENCODE_ARGS` | Extra args passed to every `opencode` launch (resume/fork/new/last), e.g. `--port 4096`. A CLI `--` passthrough overrides this. Args are whitespace-split, so values containing spaces are not supported. |
 
 ## Prior art
 
@@ -133,4 +136,3 @@ A few knobs live at the top of the `ocsz` script:
 ## License
 
 [MIT](LICENSE)
-
