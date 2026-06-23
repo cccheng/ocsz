@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export LC_ALL=C.utf8
+
+CREATED_COL="time_created"
+UPDATED_COL="time_updated"
+TIME_WIDTH=9
+TITLE_WIDTH=50
+SUB_MARKER='◦ '
+if [[ -z ${NO_COLOR:-} && -z ${OCSZ_NO_COLOR:-} ]]; then
+  C_TIME=$'\033[90m'
+  C_DIM=$'\033[90m'
+  C_DIR=$'\033[36m'
+  C_RESET=$'\033[0m'
+else
+  C_TIME=''
+  C_DIM=''
+  C_DIR=''
+  C_RESET=''
+fi
+SQL="SELECT id, title, directory, ${CREATED_COL}, ${UPDATED_COL} FROM session ORDER BY ${UPDATED_COL} DESC"
+KEYMAP="enter resume | ctrl-f fork | alt-n new | alt-l continue last | alt-s show/hide subagents | ctrl-x delete | ctrl-y copy id+cmd | ? toggle preview | esc/ctrl-c quit"
+
+usage() {
+  cat <<EOF
+Usage: ocsz [--help]
+
+Browse opencode sessions with fzf.
+
+Keymap:
+  enter    resume selected session
+  ctrl-f   fork selected session, then resume
+  alt-n    new session in current directory
+  alt-l    continue last session
+  alt-s    show/hide subagent sessions
+  ctrl-x   delete selected session, then refresh
+  ctrl-y   copy selected session id and resume command
+  ?        toggle preview
+  esc      quit
+
+SQL:
+  ${SQL}
+EOF
+}
+
+abs_time() {
+  local ms=$1 sec
+  if [[ ! $ms =~ ^[0-9]+$ ]]; then
+    printf 'unknown'
+    return
+  fi
+  sec=$((ms / 1000))
+  date -d "@${sec}" '+%Y-%m-%d %H:%M:%S %Z'
+}
+
+rel_time() {
+  local ms=$1 now sec diff value
+  if [[ ! $ms =~ ^[0-9]+$ ]]; then
+    printf 'unknown'
+    return
+  fi
+  now=$(date +%s)
+  sec=$((ms / 1000))
+  diff=$((now - sec))
+  (( diff < 0 )) && diff=0
+
+  if (( diff < 60 )); then
+    printf 'just now'
+  elif (( diff < 3600 )); then
+    value=$((diff / 60)); printf '%dm ago' "$value"
+  elif (( diff < 86400 )); then
+    value=$((diff / 3600)); printf '%dh ago' "$value"
+  elif (( diff < 2592000 )); then
+    value=$((diff / 86400)); printf '%dd ago' "$value"
+  elif (( diff < 31536000 )); then
+    value=$((diff / 2592000)); printf '%dmo ago' "$value"
+  else
+    value=$((diff / 31536000)); printf '%dy ago' "$value"
+  fi
+}
+
+collapse_home() {
+  local dir=$1
+  if [[ $dir == "$HOME" ]]; then
+    printf '~'
+  elif [[ $dir == "$HOME"/* ]]; then
+    printf '%s/%s' '~' "${dir#"$HOME"/}"
+  else
+    printf '%s' "$dir"
+  fi
+}
+
+# ASCII chars are 1 col, non-ASCII chars are 2 cols, with exceptions.
+char_width() {
+  local ch=$1 code
+  printf -v code '%d' "'$ch"
+  # 8230 = ellipsis, 9702 = ◦ and must match SUB_MARKER.
+  if (( code <= 127 || code == 8230 || code == 9702 )); then
+    printf '1'
+  else
+    printf '2'
+  fi
+}
+
+disp_width() {
+  local s=$1 i ch w=0
+  for ((i = 0; i < ${#s}; i++)); do
+    ch=${s:i:1}
+    w=$((w + $(char_width "$ch")))
+  done
+  printf '%d' "$w"
+}
+
+truncate_pad() {
+  local s=$1 budget=$2 i ch cw out="" w=0
+  for ((i = 0; i < ${#s}; i++)); do
+    ch=${s:i:1}
+    cw=$(char_width "$ch")
+    if (( w + cw > budget - 1 )) && (( i < ${#s} - 1 )); then
+      out+='…'
+      w=$((w + 1))
+      break
+    fi
+    if (( w + cw > budget )); then
+      break
+    fi
+    out+=$ch
+    w=$((w + cw))
+  done
+  while (( w < budget )); do
+    out+=' '
+    w=$((w + 1))
+  done
+  printf '%s' "$out"
+}
+
+print_fzf_lines() {
+  local id title dir parent created updated created_abs created_rel updated_abs updated_rel display_dir display padded_time padded_title title_src where q line
+  where=""
+  [[ ${OCSZ_SHOW_CHILDREN:-0} == 1 ]] || where="WHERE parent_id IS NULL OR parent_id = ''"
+  q="SELECT id, title, directory, parent_id, ${CREATED_COL}, ${UPDATED_COL} FROM session ${where} ORDER BY ${UPDATED_COL} DESC"
+  opencode db --format tsv "$q" | {
+    IFS= read -r _ || true
+    while IFS= read -r line; do
+      line=${line//$'\t'/$'\x1f'}
+      IFS=$'\x1f' read -r id title dir parent created updated <<<"$line"
+      [[ -z ${id:-} ]] && continue
+      created_abs=$(abs_time "$created")
+      created_rel=$(rel_time "$created")
+      updated_abs=$(abs_time "$updated")
+      updated_rel=$(rel_time "$updated")
+      display_dir=$(collapse_home "$dir")
+      if [[ -n ${OCSZ_CACHE:-} ]]; then
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+          "$id" "$title" "$dir" "$created" "$updated" "$created_abs" "$created_rel" "$updated_abs" "$updated_rel" "$display_dir" >>"$OCSZ_CACHE"
+      fi
+      padded_time=$(printf '%-*s' "$TIME_WIDTH" "$updated_rel")
+      if [[ -n $parent ]]; then
+        title_src=${SUB_MARKER}${title}
+        padded_title=$(truncate_pad "$title_src" "$TITLE_WIDTH")
+        display=$(printf '%s%s  %s  %s%s' \
+          "$C_DIM" "$padded_time" "$padded_title" "$display_dir" "$C_RESET")
+      else
+        title_src=$title
+        padded_title=$(truncate_pad "$title_src" "$TITLE_WIDTH")
+        display=$(printf '%s%s%s  %s  %s%s%s' \
+          "$C_TIME" "$padded_time" "$C_RESET" \
+          "$padded_title" \
+          "$C_DIR" "$display_dir" "$C_RESET")
+      fi
+      printf '%s\t%s\t%s\n' "$display" "$id" "$dir"
+    done
+  }
+}
+
+preview() {
+  local cache=$1 wanted=$2 id title dir created updated created_abs created_rel updated_abs updated_rel display_dir
+  while IFS=$'\t' read -r id title dir created updated created_abs created_rel updated_abs updated_rel display_dir; do
+    if [[ $id == "$wanted" ]]; then
+      printf 'Title:     %s\n' "$title"
+      printf 'Session:   %s\n' "$id"
+      printf 'Directory: %s\n' "$display_dir"
+      printf 'Created:   %s   (%s)\n' "$created_abs" "$created_rel"
+      printf 'Updated:   %s   (%s)\n' "$updated_abs" "$updated_rel"
+      return 0
+    fi
+  done <"$cache"
+}
+
+copy_to_clipboard() {
+  local text=$1 encoded
+  if command -v wl-copy >/dev/null 2>&1; then
+    printf '%s' "$text" | wl-copy
+  elif command -v xclip >/dev/null 2>&1; then
+    printf '%s' "$text" | xclip -selection clipboard
+  elif command -v xsel >/dev/null 2>&1; then
+    printf '%s' "$text" | xsel --clipboard --input
+  elif command -v pbcopy >/dev/null 2>&1; then
+    printf '%s' "$text" | pbcopy
+  else
+    encoded=$(printf '%s' "$text" | base64 | tr -d '\n')
+    if ! { printf '\033]52;c;%s\007' "$encoded" >/dev/tty; } 2>/dev/null; then
+      printf '\033]52;c;%s\007' "$encoded"
+    fi
+    printf '\n(no clipboard tool; copied via OSC52 / printed below)\n%s\n' "$text"
+  fi
+}
+
+copy_resume() {
+  local id=$1 dir=$2 text
+  text=$(printf 'Session: %s\nCommand: opencode %s -s %s' "$id" "$dir" "$id")
+  copy_to_clipboard "$text"
+}
+
+delete_session() {
+  local id=$1 answer
+  printf 'Delete session %s? [y/N] ' "$id" >/dev/tty
+  IFS= read -r answer </dev/tty || answer=
+  case $answer in
+    y|Y|yes|YES) opencode session delete "$id" ;;
+    *) printf 'Not deleted.\n' >/dev/tty ;;
+  esac
+}
+
+run_action() {
+  local action=$1 id=${2:-} dir=${3:-}
+  case $action in
+    resume)
+      if [[ ${OCSZ_DRY_RUN:-0} == 1 ]]; then printf 'opencode %s -s %s\n' "$dir" "$id"; else exec opencode "$dir" -s "$id"; fi ;;
+    fork)
+      if [[ ${OCSZ_DRY_RUN:-0} == 1 ]]; then printf 'opencode %s --fork -s %s\n' "$dir" "$id"; else exec opencode "$dir" --fork -s "$id"; fi ;;
+    new)
+      if [[ ${OCSZ_DRY_RUN:-0} == 1 ]]; then printf 'opencode\n'; else exec opencode; fi ;;
+    last)
+      if [[ ${OCSZ_DRY_RUN:-0} == 1 ]]; then printf 'opencode -c\n'; else exec opencode -c; fi ;;
+    *) printf 'Unknown action: %s\n' "$action" >&2; return 2 ;;
+  esac
+}
+
+reload_lines() {
+  local statefile=$1 cachefile=$2
+  : >"$cachefile"
+  export OCSZ_CACHE=$cachefile
+  OCSZ_SHOW_CHILDREN=$(cat "$statefile" 2>/dev/null || printf '0')
+  export OCSZ_SHOW_CHILDREN
+  print_fzf_lines
+}
+
+toggle_children() {
+  local statefile=$1 cachefile=$2 cur
+  cur=$(cat "$statefile" 2>/dev/null || printf '0')
+  if [[ $cur == 1 ]]; then
+    printf '0' >"$statefile"
+  else
+    printf '1' >"$statefile"
+  fi
+  reload_lines "$statefile" "$cachefile"
+}
+
+main() {
+  # cache/input/state are intentionally GLOBAL so the EXIT trap can still
+  # see them after main() unwinds (local vars would be unbound under set -u).
+  local self self_q line_count
+  local -a fzf_color=()
+  case ${1:-} in
+    -h|--help) usage; exit 0 ;;
+    --fzf-lines) : "${OCSZ_CACHE:=}"; print_fzf_lines; exit 0 ;;
+    --preview) preview "$2" "$3"; exit 0 ;;
+    --copy) copy_to_clipboard "$2"; exit 0 ;;
+    --copy-resume) copy_resume "$2" "$3"; exit 0 ;;
+    --delete) delete_session "$2"; exit 0 ;;
+    --reload) reload_lines "$2" "$3"; exit 0 ;;
+    --toggle-children) toggle_children "$2" "$3"; exit 0 ;;
+    --disp-width) disp_width "$2"; printf '\n'; exit 0 ;;
+    --truncate-pad) truncate_pad "$2" "$3"; exit 0 ;;
+    --action) run_action "$2" "${3:-}" "${4:-}"; exit 0 ;;
+  esac
+
+  cache=$(mktemp)
+  input=$(mktemp)
+  state=$(mktemp)
+  printf '0' >"$state"
+  trap 'rm -f "${cache:-}" "${input:-}" "${state:-}"' EXIT
+  export OCSZ_CACHE=$cache
+
+  print_fzf_lines >"$input"
+  line_count=$(wc -l <"$input")
+  if (( line_count == 0 )); then
+    printf 'No opencode sessions found.\n'
+    exit 0
+  fi
+
+  self=${BASH_SOURCE[0]}
+  self_q=$(printf '%q' "$self")
+  if [[ -z ${NO_COLOR:-} && -z ${OCSZ_NO_COLOR:-} ]]; then
+    fzf_color=(--color='hl:cyan,hl+:cyan:bold,pointer:cyan,marker:cyan,prompt:cyan,spinner:cyan,info:bright-black,header:bright-black,border:bright-black')
+  fi
+
+  fzf \
+    --ansi \
+    "${fzf_color[@]}" \
+    --delimiter=$'\t' \
+    --with-nth=1 \
+    --header="$KEYMAP" \
+    --preview="$self_q --preview $(printf '%q' "$cache") {2}" \
+    --bind="enter:become($self_q --action resume {2} {3})" \
+    --bind="ctrl-f:become($self_q --action fork {2} {3})" \
+    --bind="alt-n:become($self_q --action new)" \
+    --bind="alt-l:become($self_q --action last)" \
+    --bind="alt-s:reload($self_q --toggle-children $(printf '%q' "$state") $(printf '%q' "$cache"))" \
+    --bind="ctrl-x:execute($self_q --delete {2})+reload($self_q --reload $(printf '%q' "$state") $(printf '%q' "$cache"))" \
+    --bind="ctrl-y:execute-silent($self_q --copy-resume {2} {3})" \
+    --bind="?:toggle-preview" \
+    <"$input"
+}
+
+main "$@"
