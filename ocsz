@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export LC_ALL=C.utf8
+# Ensure a UTF-8 locale so multibyte (CJK) width math works.
+# C.UTF-8 / C.utf8 are glibc-only (absent on macOS/BSD), so probe for an
+# available UTF-8 locale instead of forcing one (avoids setlocale warnings).
+if [ "$(locale charmap 2>/dev/null)" != "UTF-8" ]; then
+  for _loc in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8 UTF-8; do
+    if [ "$(LC_ALL="$_loc" locale charmap 2>/dev/null)" = "UTF-8" ]; then
+      export LC_ALL="$_loc"
+      break
+    fi
+  done
+  unset _loc
+fi
 
 CREATED_COL="time_created"
 UPDATED_COL="time_updated"
